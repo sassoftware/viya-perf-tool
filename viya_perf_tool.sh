@@ -43,8 +43,8 @@ PID=$$
 GLOBAL_START_TIME="$(date)"
 GLOBAL_SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 GLOBAL_SCRIPT_NAME="$(basename "$(readlink -f "$0")")"
-GLOBAL_SCRIPT_VERSION="4.0.0"
-GLOBAL_SCRIPT_BUILD_ID="20210524400"
+GLOBAL_SCRIPT_VERSION="4.0.1"
+GLOBAL_SCRIPT_BUILD_ID="20220201401"
 GLOBAL_CONFIG_NAME="viya_perf_tool.conf"
 GLOBAL_CONFIG_VERSION="1.0.0"
 GLOBAL_CONFIG_FULL="${GLOBAL_SCRIPT_DIR}/${GLOBAL_CONFIG_NAME}"
@@ -1575,9 +1575,9 @@ initialize_io() {
 				iotest_mode=PATH
 			fi
 			if [[ "${GLOBAL_TEST_MODE}" -eq 1 ]]; then
-				file_size=1
+				file_size_gb=1
 			else
-				file_size=40
+				file_size_gb=40
 			fi
 		;;
 		cdc)
@@ -1587,9 +1587,9 @@ initialize_io() {
 				shared_dir=1
 			fi
 			if [[ "${GLOBAL_TEST_MODE}" -eq 1 ]]; then
-				file_size=1
+				file_size_gb=1
 			else
-				file_size=20
+				file_size_gb=20
 			fi
 		;;
 	esac
@@ -1672,7 +1672,7 @@ validate_system() {
 	fi
 
 	local mount point
-	stack_size="$(echo "${file_size}*1024*1024" | bc -l)"
+	file_size_kb="$(echo "${file_size_gb}*1024*1024" | bc -l)"
 	target_df="$(df -k "${target_dir}" | sed 'N;/\n \+/s/\n \+/ /;P;D' | tail -1)"
 	mount_point="$(echo "${target_df}" | awk '{print $NF}')"
 	target_mount="$(mount | grep -F "on ${mount_point} ")"
@@ -1712,8 +1712,8 @@ validate_system() {
 						message_handle 31
 					fi
 					# max allocsize = (file size | 8GB), whichever is smaller
-					if [[ "${stack_size}" -le 8388608 ]]; then
-						max_alloc_size="${stack_size}"
+					if [[ "${file_size_kb}" -le 8388608 ]]; then
+						max_alloc_size="${file_size_kb}"
 					else
 						max_alloc_size=8388608
 					fi
@@ -1741,9 +1741,8 @@ validate_system() {
 	avail_space="$(echo "${target_df}" | awk '{print $4}')"
 	buffer="$(echo "scale=0; ${total_space}/10" | bc -l)"
 	if [[ "${shared_dir}" -eq 1 ]]; then
-		local tmp_target_size
-		tmp_target_size="$(echo "scale=0; ${avail_space}-${buffer}" | bc -l)"
-		target_size="$(echo "scale=0; ${tmp_target_size}/${num_hosts}" | bc -l)"
+		local tot_target_size="$(echo "scale=0; ${avail_space}-${buffer}" | bc -l)"
+		target_size="$(echo "scale=0; ${tot_target_size}/${num_hosts}" | bc -l)"
 
 		if [[ "${iotest_mode}" == "DNFS" ]]; then
 			echo_out "Assuming target dir is a shared file system because [SHARED_DATA_DIR=Y]"
@@ -1753,7 +1752,7 @@ validate_system() {
 		echo_out "Total shared file system space: $(print_calc_2d ${total_space}/1024/1024) GB"
 		echo_out "Available shared file system space: $(print_calc_2d ${avail_space}/1024/1024) GB"
 		echo_out "10% buffer: $(print_calc_2d ${buffer}/1024/1024) GB"
-		echo_out "Available space - buffer: $(print_calc_2d ${target_size}/1024/1024) GB"
+		echo_out "Available space - buffer: $(print_calc_2d ${tot_target_size}/1024/1024) GB"
 		echo_out "Workers: ${num_hosts}"
 		echo_out "Available space per worker [(available space - buffer) / # of workers]: $(print_calc_2d ${target_size}/1024/1024) GB"
 	else
@@ -1770,22 +1769,22 @@ validate_system() {
 		message_handle 35
 	fi
 
+	# calculate # of blocks to use per iteration (total mem/block_size)
+	num_blocks="$(echo "scale=0; ${file_size_kb}/${block_size}" | bc -l)"
 	# calculate total required space including one extra iteration required for flushing files from cache
-	req_space="$(echo "(${stack_size}+${max_alloc_size})*${total_iterations}" | bc -l)"
-	# calculate # of blocks to use (total mem/block_size)
-	num_blocks="$(echo "scale=0; ${stack_size}/${block_size}" | bc -l)"
-	echo_out "Iterations (threads) per physical CPU core: ${tmult}"
-	echo_out "Total iterations (including one extra for flushing file cache): ${total_iterations}"
-	echo_out "Filesize per iteration: ${file_size} GB"
-	echo_out "Blocksize: ${block_size} KB"
-	echo_out "Blocks: $(printf "%'d" ${num_blocks})"
-
+	req_space="$(echo "(${file_size_kb}*${total_iterations})+${total_alloc_size}" | bc -l)"
+	echo_out "Iterations (threads) per physical core: ${tmult}"
+	echo_out "Total iterations: ${iterations}"
+	echo_out "Block size: ${block_size} KB"
+	echo_out "Blocks per iteration: $(printf "%'d" ${num_blocks})"
+	echo_out "File size per iteration: ${file_size_gb} GB"
+	echo_out "Total file size: $(print_calc_2d ${file_size_kb}*${iterations}/1024/1024) GB"
 	if [[ "${max_alloc_size}" -gt 0 ]]; then
 		[[ ! -z "${man_alloc_size}" ]] && echo_out "Mount-defined preallocation size: ${man_alloc_size}"
-		echo_out "Max preallocation size per file: $(print_calc_2d ${max_alloc_size}/1024/1024) GB"
+		echo_out "Max preallocation size per iteration: $(print_calc_2d ${max_alloc_size}/1024/1024) GB"
 		echo_out "Total max preallocation size: $(print_calc_2d ${total_alloc_size}/1024/1024) GB"
 	fi
-	echo_out "Total required space: $(print_calc_2d ${req_space}/1024/1024) GB"
+	echo_out "Total required space (including an extra file for flushing file cache): $(print_calc_2d ${req_space}/1024/1024) GB"
 
 	# check if available space - buff is less than the required space
 	if [[ "${target_size}" -lt "${req_space}" ]]; then
@@ -1794,7 +1793,7 @@ validate_system() {
 		if [[ "${target_size}" -lt 1 ]]; then
 			message_handle 38 "${target_dir}"
 		fi
-		echo_out "-- Recalculating stack size and # of blocks --"
+		echo_out "-- Recalculating file size and # of blocks --"
 
 		# alloc_size_flag
 		# 0 -> skip
@@ -1802,37 +1801,39 @@ validate_system() {
 		# 2 -> calculated
 		if [[ "${alloc_size_flag}" -eq 1 ]]; then
 			# use user-defined preallocation size
-			stack_size="$(echo "scale=0; (${target_size}-${total_alloc_size})/${total_iterations})" | bc -l)"
+			file_size_kb="$(echo "scale=0; (${target_size}-${total_alloc_size})/${total_iterations})" | bc -l)"
 		elif [[ "${alloc_size_flag}" -eq 2 ]]; then
-			tmp_stack_size="$(echo "scale=0; ${target_size}/${total_iterations}" | bc -l)"
-			# if stack size is lt 16GB, set max preallocation size equal to file size
+			local tmp_file_size_kb="$(echo "scale=0; ${target_size}/${total_iterations}" | bc -l)"
+			# if file size is lt 16GB, set max preallocation size equal to file size
 			# else set max preallocation size to 8GB
-			if [[ "${tmp_stack_size}" -le 16777216 ]]; then
-				stack_size="$(echo "scale=0; ${tmp_stack_size}/2" | bc -l)"
-				max_alloc_size="$(echo "scale=0; ${tmp_stack_size}-${stack_size}" | bc -l)"
+			if [[ "${tmp_file_size_kb}" -le 16777216 ]]; then
+				file_size_kb="$(echo "scale=0; ${tmp_file_size_kb}/2" | bc -l)"
+				max_alloc_size="$(echo "scale=0; ${tmp_file_size_kb}-${file_size_kb}" | bc -l)"
 			else
 				max_alloc_size=8388608
-				stack_size="$(echo "scale=0; ${tmp_stack_size}-${max_alloc_size}" | bc -l)"
+				file_size_kb="$(echo "scale=0; ${tmp_file_size_kb}-${max_alloc_size}" | bc -l)"
 			fi
 		else
-			stack_size="$(echo "scale=0; ${target_size}/${total_iterations}" | bc -l)"
+			file_size_kb="$(echo "scale=0; ${target_size}/${total_iterations}" | bc -l)"
 		fi
 		# recalculate vars to adjust for rounding
 		total_alloc_size="$(echo "${max_alloc_size}*${iterations}" | bc -l)"
-		num_blocks="$(echo "scale=0; ${stack_size}/${block_size}" | bc -l)"
-		stack_size="$(echo "${num_blocks}*${block_size}" | bc -l)"
-		req_space="$(echo "(${stack_size}*${total_iterations})+${total_alloc_size}" | bc -l)"
-		echo_out "Iterations (threads) per physical CPU core: ${tmult}"
-		echo_out "Total iterations (including one extra for flushing file cache): ${total_iterations}"
-		echo_out "Filesize per iteration: $(print_calc_2d ${stack_size}/1024/1024) GB"
-		echo_out "Blocksize: ${block_size} KB"
-		echo_out "Blocks: $(printf "%'d" ${num_blocks})"
+		num_blocks="$(echo "scale=0; ${file_size_kb}/${block_size}" | bc -l)"
+		file_size_kb="$(echo "${num_blocks}*${block_size}" | bc -l)"
+		file_size_gb="$(echo "scale=2;${file_size_kb}/1024/1024" | bc -l)"
+		req_space="$(echo "(${file_size_kb}*${total_iterations})+${total_alloc_size}" | bc -l)"
+		echo_out "Iterations (threads) per physical core: ${tmult}"
+		echo_out "Total iterations: ${iterations}"
+		echo_out "Block size: ${block_size} KB"
+		echo_out "Blocks per iteration: $(printf "%'d" ${num_blocks})"
+		echo_out "File size per iteration: $(print_calc_2d ${file_size_gb}) GB"
+		echo_out "Total file size: $(print_calc_2d ${file_size_kb}*${iterations}/1024/1024) GB"
 		if [[ "${max_alloc_size}" -gt 0 ]]; then
 			[[ ! -z "${man_alloc_size}" ]] && echo_out "Mount-defined preallocation size: ${man_alloc_size}"
-			echo_out "Max preallocation size per file: $(print_calc_2d ${max_alloc_size}/1024/1024) GB"
+			echo_out "Max preallocation size per iteration: $(print_calc_2d ${max_alloc_size}/1024/1024) GB"
 			echo_out "Total max preallocation size: $(print_calc_2d ${total_alloc_size}/1024/1024) GB"
 		fi
-		echo_out "Total required space: $(print_calc_2d ${req_space}/1024/1024) GB"
+		echo_out "Total required space (including an extra file for flushing file cache): $(print_calc_2d ${req_space}/1024/1024) GB"
 		# verify that blocks and block_size are all set before starting tests
 		if [[ -z "${num_blocks}" ]]; then
 			message_handle 40
@@ -1997,13 +1998,12 @@ print_iotest_results() {
 	done < "${output_dir}/vpt_${iotest_mode}.real.${iterations}"
 
 	# calculate file sizes and throughput rates
-	local stack_size_mb stack_size_gb average_read_time average_read_rate average_write_time average_write_rate
-	stack_size_mb="$(echo "scale=2;${stack_size} / 1024" | bc -l)"
-	stack_size_gb="$(echo "scale=2;${stack_size}/1024/1024" | bc -l)"
-	average_read_time="$(echo "scale=2;${total_read_time}/${total_cores}" | bc -l)"
-	average_read_rate="$(echo "scale=2;${stack_size_mb}/${average_read_time}" | bc -l)"
-	average_write_time="$(echo "scale=2;${total_write_time}/${total_cores}" | bc -l)"
-	average_write_rate="$(echo "scale=2;${stack_size_mb}/${average_write_time}" | bc -l)"
+	local file_size_mb average_read_time average_read_rate average_write_time average_write_rate
+	file_size_mb="$(echo "scale=2;${file_size_kb}/1024" | bc -l)"
+	average_read_time="$(echo "scale=2;${total_read_time}/${iterations}/${tmult}" | bc -l)"
+	average_read_rate="$(echo "scale=2;${file_size_mb}/${average_read_time}" | bc -l)"
+	average_write_time="$(echo "scale=2;${total_write_time}/${iterations}/${tmult}" | bc -l)"
+	average_write_rate="$(echo "scale=2;${file_size_mb}/${average_write_time}" | bc -l)"
 
 	# print results to output files and console
 	echo_out "--- Begin ${iotest_mode} IO test results ---"
@@ -2012,7 +2012,7 @@ print_iotest_results() {
 	echo_out "   directory:    ${target_dir}"
 	echo_out "   df -k:        ${target_df}"
 	echo_out "   mount point:  ${target_mount}"
-	echo_out "   filesize:     $(print_calc_2d ${stack_size_gb}) GB"
+	echo_out "   file size:    $(print_calc_2d ${file_size_gb}) GB"
 	echo_out " STATISTICS"
 	echo_out "   read time:              $(print_calc_2d ${average_read_time}) seconds per physical core"
 	echo_out "   read throughput rate:   $(print_calc_2d ${average_read_rate}) MB/second per physical core"
