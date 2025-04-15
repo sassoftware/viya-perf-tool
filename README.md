@@ -1,3 +1,5 @@
+This project is no longer under development and the project was archived on 2025-04-15.
+
 # Viya Perf Tool
 
 The Viya Perf Tool is a Bash script that measures network and/or storage I/O performance on SAS Viya 3.5 hosts running RHEL or CentOS 7.x. It runs independently using operating system commands and no SAS software is required.
